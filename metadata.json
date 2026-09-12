@@ -1,0 +1,7 @@
+{
+  "name": "Voxel Strike - FPS Multiplayer 3D",
+  "description": "Jogo FPS 3D multiplayer em tempo real com salas via código, placar ao vivo, modos Solo, Equipes e Parkour.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
