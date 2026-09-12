@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { RoomState, GameMode, Team, PlayerData } from '../types/game';
+import { RoomState, GameMode, Team, PlayerData, BotDifficulty } from '../types/game';
 import {
   Users,
   Copy,
@@ -16,6 +16,10 @@ import {
   Wifi,
   Sparkles,
   Award,
+  UserPlus,
+  Trash2,
+  Plus,
+  Minus,
 } from 'lucide-react';
 
 interface LobbyViewProps {
@@ -26,9 +30,13 @@ interface LobbyViewProps {
     mapId?: 'castle' | 'desert' | 'neon' | 'parkour';
     mode?: GameMode;
     botsEnabled?: boolean;
+    botCount?: number;
+    botDifficulty?: BotDifficulty;
     scoreLimit?: number;
     timeLimit?: number;
   }) => void;
+  onAddBot?: (team?: Team) => void;
+  onRemoveBot?: (botId?: string) => void;
   onSwitchTeam: (team: Team) => void;
   onLeaveRoom: () => void;
   onOpenSettings: () => void;
@@ -39,6 +47,8 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
   currentUserId,
   onStartGame,
   onUpdateSettings,
+  onAddBot,
+  onRemoveBot,
   onSwitchTeam,
   onLeaveRoom,
   onOpenSettings,
@@ -229,16 +239,25 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
                     </div>
                   </div>
 
-                  <div>
+                  <div className="flex items-center gap-1.5">
                     {isMe && (
                       <span className="text-[10px] uppercase font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30 px-2 py-0.5 rounded">
                         Você
                       </span>
                     )}
                     {player.isBot && (
-                      <span className="text-[10px] uppercase font-bold bg-neutral-800 text-neutral-400 px-2 py-0.5 rounded border border-neutral-700 flex items-center gap-1">
+                      <span className="text-[10px] uppercase font-bold bg-cyan-950/60 text-cyan-400 px-2 py-0.5 rounded border border-cyan-500/30 flex items-center gap-1">
                         <Bot className="w-3 h-3" /> BOT
                       </span>
+                    )}
+                    {isHost && player.isBot && onRemoveBot && (
+                      <button
+                        onClick={() => onRemoveBot(player.id)}
+                        className="p-1 rounded bg-neutral-800 hover:bg-red-950 hover:text-red-400 text-neutral-400 transition-colors"
+                        title="Remover este bot"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
                     )}
                   </div>
                 </div>
@@ -246,23 +265,111 @@ export const LobbyView: React.FC<LobbyViewProps> = ({
             })}
           </div>
 
-          {/* Bots toggle for host */}
+          {/* Bot Management Panel for Host */}
           {isHost && (
-            <div className="mt-4 pt-3 border-t border-neutral-800 flex items-center justify-between text-xs">
-              <span className="text-neutral-400 flex items-center gap-1.5">
-                <Bot className="w-4 h-4 text-cyan-400" />
-                Preencher com Bots:
-              </span>
-              <button
-                onClick={() => onUpdateSettings({ botsEnabled: !room.botsEnabled })}
-                className={`px-3 py-1 rounded-lg font-semibold uppercase text-[11px] transition-colors ${
-                  room.botsEnabled
-                    ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
-                    : 'bg-neutral-800 text-neutral-500'
-                }`}
-              >
-                {room.botsEnabled ? 'Ativado' : 'Desativado'}
-              </button>
+            <div className="mt-4 pt-3 border-t border-neutral-800 space-y-3">
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-neutral-300 font-bold flex items-center gap-1.5">
+                  <Bot className="w-4 h-4 text-cyan-400" />
+                  Bots na Partida
+                </span>
+                <button
+                  onClick={() => onUpdateSettings({ botsEnabled: !room.botsEnabled })}
+                  className={`px-2.5 py-1 rounded-lg font-semibold uppercase text-[10px] transition-colors ${
+                    room.botsEnabled
+                      ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
+                      : 'bg-neutral-800 text-neutral-500'
+                  }`}
+                >
+                  {room.botsEnabled ? 'Ativado' : 'Desativado'}
+                </button>
+              </div>
+
+              {room.botsEnabled && (
+                <div className="p-3 bg-neutral-950 rounded-xl border border-neutral-800/80 space-y-2.5">
+                  {/* Bot Difficulty */}
+                  <div>
+                    <label className="text-[10px] font-bold uppercase tracking-wider text-neutral-400 block mb-1">
+                      Dificuldade da IA
+                    </label>
+                    <div className="grid grid-cols-3 gap-1">
+                      {(
+                        [
+                          { id: 'easy', label: 'Fácil' },
+                          { id: 'medium', label: 'Médio' },
+                          { id: 'hard', label: 'Difícil' },
+                        ] as const
+                      ).map(d => (
+                        <button
+                          key={d.id}
+                          onClick={() => onUpdateSettings({ botDifficulty: d.id })}
+                          className={`py-1 rounded text-[10px] font-bold uppercase transition-all ${
+                            (room.botDifficulty || 'medium') === d.id
+                              ? 'bg-cyan-500/20 border border-cyan-400 text-cyan-300'
+                              : 'bg-neutral-900 border border-neutral-800 text-neutral-400 hover:text-neutral-200'
+                          }`}
+                        >
+                          {d.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Bot Count Selector */}
+                  <div className="flex items-center justify-between pt-1">
+                    <span className="text-[10px] font-bold uppercase text-neutral-400">Total de Bots:</span>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const current = room.botCount ?? 4;
+                          if (current > 1) {
+                            onUpdateSettings({ botCount: current - 1 });
+                          }
+                        }}
+                        className="p-1 rounded bg-neutral-900 hover:bg-neutral-800 text-neutral-300 border border-neutral-800"
+                      >
+                        <Minus className="w-3 h-3" />
+                      </button>
+                      <span className="font-mono text-xs font-bold text-cyan-400 min-w-[20px] text-center">
+                        {room.botCount ?? 4}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const current = room.botCount ?? 4;
+                          if (current < (room.maxPlayers || 10) - 1) {
+                            onUpdateSettings({ botCount: current + 1 });
+                          }
+                        }}
+                        className="p-1 rounded bg-neutral-900 hover:bg-neutral-800 text-neutral-300 border border-neutral-800"
+                      >
+                        <Plus className="w-3 h-3" />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Quick Add / Remove Bot Buttons */}
+                  {onAddBot && (
+                    <div className="pt-2 border-t border-neutral-800/60 flex gap-2">
+                      <button
+                        onClick={() => onAddBot()}
+                        className="flex-1 py-1.5 rounded-lg bg-neutral-900 hover:bg-cyan-950/40 border border-neutral-800 hover:border-cyan-500/40 text-cyan-400 text-[10px] font-bold uppercase flex items-center justify-center gap-1 transition-colors"
+                      >
+                        <Plus className="w-3 h-3" /> +1 Bot
+                      </button>
+                      {onRemoveBot && (
+                        <button
+                          onClick={() => onRemoveBot()}
+                          className="flex-1 py-1.5 rounded-lg bg-neutral-900 hover:bg-red-950/40 border border-neutral-800 hover:border-red-500/40 text-red-400 text-[10px] font-bold uppercase flex items-center justify-center gap-1 transition-colors"
+                        >
+                          <Minus className="w-3 h-3" /> -1 Bot
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>

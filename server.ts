@@ -14,6 +14,7 @@ import {
   WEAPONS,
   KillFeedItem,
   ChatMessage,
+  BotDifficulty,
 } from './src/types/game.js';
 
 const app = express();
@@ -71,13 +72,42 @@ function broadcastToRoom(code: string, message: ServerMessage, excludeWs?: WebSo
 }
 
 // Bot Names for AI players
-const BOT_NAMES = ['VoxelStriker', 'BlockReaper', 'CyberNinja', 'NeonSniper', 'PixelAce', 'ShadowBlock'];
+const BOT_NAMES = [
+  'VoxelStriker',
+  'BlockReaper',
+  'CyberNinja',
+  'NeonSniper',
+  'PixelAce',
+  'ShadowBlock',
+  'GhostCube',
+  'TitanPixel',
+  'VortexBot',
+  'NovaStriker',
+];
 
 function addBotToRoom(room: RoomState, team: Team) {
   const botId = 'bot_' + Math.random().toString(36).substring(2, 8);
-  const botName = BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)] + ' [BOT]';
-  const colors = ['#ef4444', '#3b82f6', '#10b981', '#f59e0b', '#8b5cf6'];
+  const existingNames = new Set(Object.values(room.players).map(p => p.name));
+  const availableNames = BOT_NAMES.filter(n => !existingNames.has(n + ' [BOT]'));
+  const baseName =
+    availableNames.length > 0
+      ? availableNames[Math.floor(Math.random() * availableNames.length)]
+      : 'Bot_' + Math.floor(Math.random() * 899 + 100);
+  const botName = baseName + ' [BOT]';
+
+  const colors = ['#ef4444', '#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#06b6d4', '#ec4899'];
   const botColor = team === 'blue' ? '#3b82f6' : team === 'red' ? '#ef4444' : colors[Math.floor(Math.random() * colors.length)];
+
+  // Choose weapon appropriate for difficulty
+  let weapon: WeaponType = 'rifle';
+  const r = Math.random();
+  if (room.botDifficulty === 'hard') {
+    weapon = r < 0.35 ? 'sniper' : r < 0.75 ? 'rifle' : 'shotgun';
+  } else if (room.botDifficulty === 'medium') {
+    weapon = r < 0.65 ? 'rifle' : 'shotgun';
+  } else {
+    weapon = r < 0.8 ? 'rifle' : 'shotgun';
+  }
 
   const bot: PlayerData = {
     id: botId,
@@ -87,9 +117,9 @@ function addBotToRoom(room: RoomState, team: Team) {
     team: team,
     isHost: false,
     isBot: true,
-    x: (Math.random() - 0.5) * 20,
+    x: (Math.random() - 0.5) * 22,
     y: 1.5,
-    z: (Math.random() - 0.5) * 20,
+    z: (Math.random() - 0.5) * 22,
     rotY: Math.random() * Math.PI * 2,
     pitch: 0,
     hp: 100,
@@ -98,8 +128,8 @@ function addBotToRoom(room: RoomState, team: Team) {
     deaths: 0,
     score: 0,
     ping: 5,
-    currentWeapon: Math.random() > 0.4 ? 'rifle' : 'shotgun',
-    ammo: 30,
+    currentWeapon: weapon,
+    ammo: WEAPONS[weapon].magSize,
     isAlive: true,
   };
 
@@ -142,13 +172,17 @@ wss.on('connection', (ws: WebSocket) => {
           isAlive: true,
         };
 
+        const botsEnabled = msg.botsEnabled !== undefined ? msg.botsEnabled : true;
+        const botCount = msg.botCount !== undefined ? Math.max(1, Math.min(10, msg.botCount)) : 4;
+        const botDifficulty: BotDifficulty = msg.botDifficulty || 'medium';
+
         const room: RoomState = {
           code,
           name: `Sala ${code}`,
           hostId: playerId,
           mapId: msg.mapId || 'castle',
           mode: msg.mode || 'SOLO',
-          status: 'WAITING',
+          status: msg.startImmediately ? 'PLAYING' : 'WAITING',
           maxPlayers: 12,
           players: { [playerId]: newPlayer },
           scoreLimit: msg.scoreLimit || 25,
@@ -166,14 +200,27 @@ wss.on('connection', (ws: WebSocket) => {
             redScore: 0,
           },
           killFeed: [],
-          botsEnabled: true,
+          botsEnabled,
+          botCount,
+          botDifficulty,
           createdAt: Date.now(),
         };
+
+        // If startImmediately is requested (e.g. direct Solo with Bots), spawn bots now
+        if (msg.startImmediately && botsEnabled) {
+          for (let i = 0; i < botCount; i++) {
+            const team = room.mode === 'TEAM' ? (i % 2 === 0 ? 'red' : 'blue') : 'ffa';
+            addBotToRoom(room, team);
+          }
+        }
 
         rooms.set(code, room);
         clientMeta.set(ws, { playerId, roomCode: code });
 
         ws.send(JSON.stringify({ type: 'room_joined', room, yourId: playerId }));
+        if (msg.startImmediately) {
+          ws.send(JSON.stringify({ type: 'game_started', room }));
+        }
         return;
       }
 
@@ -280,12 +327,51 @@ wss.on('connection', (ws: WebSocket) => {
             }
           }
           if (msg.botsEnabled !== undefined) room.botsEnabled = msg.botsEnabled;
+          if (msg.botCount !== undefined) {
+            room.botCount = Math.max(1, Math.min(10, msg.botCount));
+          }
+          if (msg.botDifficulty !== undefined) {
+            room.botDifficulty = msg.botDifficulty;
+          }
           if (msg.scoreLimit) room.scoreLimit = msg.scoreLimit;
           if (msg.timeLimit) {
             room.timeLimitSec = msg.timeLimit;
             room.remainingTimeSec = msg.timeLimit;
           }
           broadcastToRoom(room.code, { type: 'room_update', room });
+        }
+        return;
+      }
+
+      // 4b. Add Bot (Host only)
+      if (msg.type === 'add_bot' && room.hostId === meta.playerId) {
+        const currentCount = Object.keys(room.players).length;
+        if (currentCount < room.maxPlayers) {
+          let team: Team = 'ffa';
+          if (room.mode === 'TEAM') {
+            const blueCount = Object.values(room.players).filter(p => p.team === 'blue').length;
+            const redCount = Object.values(room.players).filter(p => p.team === 'red').length;
+            team = msg.team || (blueCount <= redCount ? 'blue' : 'red');
+          }
+          addBotToRoom(room, team);
+          room.botsEnabled = true;
+          room.botCount = Object.values(room.players).filter(p => p.isBot).length;
+          broadcastToRoom(room.code, { type: 'room_update', room });
+        }
+        return;
+      }
+
+      // 4c. Remove Bot (Host only)
+      if (msg.type === 'remove_bot' && room.hostId === meta.playerId) {
+        const botList = Object.values(room.players).filter(p => p.isBot);
+        if (botList.length > 0) {
+          const target = msg.botId ? room.players[msg.botId] : botList[botList.length - 1];
+          if (target && target.isBot) {
+            delete room.players[target.id];
+            room.botCount = Object.values(room.players).filter(p => p.isBot).length;
+            if (room.botCount === 0) room.botsEnabled = false;
+            broadcastToRoom(room.code, { type: 'room_update', room });
+          }
         }
         return;
       }
@@ -318,16 +404,24 @@ wss.on('connection', (ws: WebSocket) => {
             p.parkourCheckpoint = 0;
           });
 
-          // If bots enabled and < 4 players, populate with 2-4 bots
-          const humanCount = Object.values(room.players).filter(p => !p.isBot).length;
-          if (room.botsEnabled && humanCount < 6) {
-            const neededBots = Math.min(4, 6 - humanCount);
-            // remove existing bots first
+          // If bots enabled, ensure room has requested bot count
+          if (room.botsEnabled) {
+            // Remove existing bots to re-spawn cleanly
             Object.keys(room.players).forEach(pid => {
               if (room.players[pid].isBot) delete room.players[pid];
             });
-            for (let i = 0; i < neededBots; i++) {
-              const team = room.mode === 'TEAM' ? (i % 2 === 0 ? 'red' : 'blue') : 'ffa';
+
+            const humanCount = Object.values(room.players).filter(p => !p.isBot).length;
+            const slotsAvailable = Math.max(0, room.maxPlayers - humanCount);
+            const targetBots = Math.min(slotsAvailable, room.botCount || 4);
+
+            for (let i = 0; i < targetBots; i++) {
+              let team: Team = 'ffa';
+              if (room.mode === 'TEAM') {
+                const blueCount = Object.values(room.players).filter(p => p.team === 'blue').length;
+                const redCount = Object.values(room.players).filter(p => p.team === 'red').length;
+                team = blueCount <= redCount ? 'blue' : 'red';
+              }
               addBotToRoom(room, team);
             }
           }
@@ -343,14 +437,40 @@ wss.on('connection', (ws: WebSocket) => {
           room.status = 'PLAYING';
           room.remainingTimeSec = room.timeLimitSec;
           room.teamScores = { blue: 0, red: 0 };
+          room.killFeed = [];
+
+          // If bots enabled, ensure bots are present
+          if (room.botsEnabled) {
+            Object.keys(room.players).forEach(pid => {
+              if (room.players[pid].isBot) delete room.players[pid];
+            });
+            const humanCount = Object.values(room.players).filter(p => !p.isBot).length;
+            const slotsAvailable = Math.max(0, room.maxPlayers - humanCount);
+            const targetBots = Math.min(slotsAvailable, room.botCount || 4);
+
+            for (let i = 0; i < targetBots; i++) {
+              let team: Team = 'ffa';
+              if (room.mode === 'TEAM') {
+                const blueCount = Object.values(room.players).filter(p => p.team === 'blue').length;
+                const redCount = Object.values(room.players).filter(p => p.team === 'red').length;
+                team = blueCount <= redCount ? 'blue' : 'red';
+              }
+              addBotToRoom(room, team);
+            }
+          }
+
           Object.values(room.players).forEach(p => {
             p.hp = 100;
             p.kills = 0;
             p.deaths = 0;
             p.score = 0;
             p.isAlive = true;
+            p.ammo = WEAPONS[p.currentWeapon].magSize;
             p.parkourTime = 0;
             p.parkourCheckpoint = 0;
+            p.x = (Math.random() - 0.5) * 20;
+            p.y = 1.5;
+            p.z = (Math.random() - 0.5) * 20;
           });
           broadcastToRoom(room.code, { type: 'game_started', room });
         }
@@ -624,12 +744,41 @@ setInterval(() => {
 
     // 3. AI Bots update
     const playersList = Object.values(room.players);
+    const difficulty = room.botDifficulty || 'medium';
+
+    const diffParams = {
+      easy: {
+        detectRange: 24,
+        moveSpeed: 0.16,
+        shootChance: 0.06,
+        hitChanceNear: 0.35,
+        hitChanceFar: 0.18,
+        headshotChance: 0.05,
+      },
+      medium: {
+        detectRange: 35,
+        moveSpeed: 0.23,
+        shootChance: 0.13,
+        hitChanceNear: 0.55,
+        hitChanceFar: 0.35,
+        headshotChance: 0.15,
+      },
+      hard: {
+        detectRange: 50,
+        moveSpeed: 0.30,
+        shootChance: 0.22,
+        hitChanceNear: 0.75,
+        hitChanceFar: 0.55,
+        headshotChance: 0.30,
+      },
+    }[difficulty];
+
     playersList.forEach(bot => {
       if (!bot.isBot || !bot.isAlive) return;
 
       // Find nearest living opponent
       let nearestOpponent: PlayerData | null = null;
-      let minDist = 35;
+      let minDist = diffParams.detectRange;
 
       playersList.forEach(other => {
         if (other.id === bot.id || !other.isAlive) return;
@@ -641,27 +790,54 @@ setInterval(() => {
         }
       });
 
+      // Target position: either opponent or capture point (in POINT mode)
+      let targetX = bot.x;
+      let targetZ = bot.z;
+      let hasTarget = false;
+
       if (nearestOpponent) {
         const opp = nearestOpponent as PlayerData;
-        const dx = opp.x - bot.x;
-        const dz = opp.z - bot.z;
+        targetX = opp.x;
+        targetZ = opp.z;
+        hasTarget = true;
+      } else if (room.mode === 'POINT' && room.pointZone) {
+        // Move towards point zone if no nearby enemy
+        const pz = room.pointZone;
+        const distToPz = Math.sqrt((pz.x - bot.x) ** 2 + (pz.z - bot.z) ** 2);
+        if (distToPz > 3) {
+          targetX = pz.x + (Math.random() - 0.5) * 3;
+          targetZ = pz.z + (Math.random() - 0.5) * 3;
+          hasTarget = true;
+        }
+      }
+
+      if (hasTarget) {
+        const dx = targetX - bot.x;
+        const dz = targetZ - bot.z;
         bot.rotY = Math.atan2(dx, dz);
 
-        // Move towards opponent if far, strafe if close
-        const moveSpeed = 0.22;
-        if (minDist > 8) {
+        const distToTarget = Math.sqrt(dx * dx + dz * dz);
+        const moveSpeed = diffParams.moveSpeed;
+
+        if (distToTarget > (nearestOpponent ? 7 : 2)) {
           bot.x += Math.sin(bot.rotY) * moveSpeed;
           bot.z += Math.cos(bot.rotY) * moveSpeed;
-        } else {
-          // Strafe
-          bot.x += Math.cos(bot.rotY) * (Math.sin(Date.now() / 400) * 0.15);
-          bot.z -= Math.sin(bot.rotY) * (Math.sin(Date.now() / 400) * 0.15);
+        } else if (nearestOpponent) {
+          // Dynamic strafing around opponent
+          const strafeFactor = difficulty === 'hard' ? 0.22 : 0.14;
+          const strafeDirection = Math.sin(Date.now() / 350);
+          bot.x += Math.cos(bot.rotY) * (strafeDirection * strafeFactor);
+          bot.z -= Math.sin(bot.rotY) * (strafeDirection * strafeFactor);
         }
+      }
 
-        // Random bot shooting chance
-        if (minDist < 25 && Math.random() < 0.1) {
-          const hitChance = minDist < 12 ? 0.45 : 0.25;
+      // Shooting at living opponent
+      if (nearestOpponent) {
+        const opp = nearestOpponent as PlayerData;
+        if (minDist < diffParams.detectRange && Math.random() < diffParams.shootChance) {
+          const hitChance = minDist < 12 ? diffParams.hitChanceNear : diffParams.hitChanceFar;
           const isHit = Math.random() < hitChance;
+          const isHeadshot = isHit && Math.random() < diffParams.headshotChance;
           const hitId = isHit ? opp.id : undefined;
 
           broadcastToRoom(room.code, {
@@ -673,7 +849,9 @@ setInterval(() => {
           });
 
           if (hitId && opp.isAlive) {
-            const dmg = WEAPONS[bot.currentWeapon].damage;
+            let dmg = WEAPONS[bot.currentWeapon].damage;
+            if (isHeadshot) dmg = Math.round(dmg * 1.8);
+
             opp.hp = Math.max(0, opp.hp - dmg);
             broadcastToRoom(room.code, {
               type: 'player_damaged',
@@ -687,7 +865,7 @@ setInterval(() => {
               opp.isAlive = false;
               opp.deaths++;
               bot.kills++;
-              bot.score += 100;
+              bot.score += isHeadshot ? 150 : 100;
 
               if (room.mode === 'TEAM') {
                 if (bot.team === 'blue') room.teamScores.blue++;
@@ -701,6 +879,7 @@ setInterval(() => {
                 victimName: opp.name,
                 victimTeam: opp.team,
                 weapon: bot.currentWeapon,
+                isHeadshot,
                 timestamp: Date.now(),
               });
               if (room.killFeed.length > 8) room.killFeed.pop();
@@ -710,6 +889,7 @@ setInterval(() => {
                 killerId: bot.id,
                 victimId: opp.id,
                 weapon: bot.currentWeapon,
+                isHeadshot,
                 respawnInSec: 3,
               });
 

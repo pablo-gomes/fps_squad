@@ -7,6 +7,7 @@ import {
   ClientMessage,
   ServerMessage,
   ChatMessage,
+  BotDifficulty,
 } from './types/game';
 import { GameCanvas } from './game/GameCanvas';
 import { HUD } from './components/HUD';
@@ -196,11 +197,19 @@ export default function App() {
     skinColor,
     mode,
     mapId,
+    botsEnabled,
+    botCount,
+    botDifficulty,
+    startImmediately,
   }: {
     playerName: string;
     skinColor: string;
     mode: GameMode;
     mapId: 'castle' | 'desert' | 'neon' | 'parkour';
+    botsEnabled?: boolean;
+    botCount?: number;
+    botDifficulty?: BotDifficulty;
+    startImmediately?: boolean;
   }) => {
     sendMessage({
       type: 'create_room',
@@ -209,6 +218,10 @@ export default function App() {
       color: skinColor,
       mapId,
       mode,
+      botsEnabled,
+      botCount,
+      botDifficulty,
+      startImmediately,
     });
   };
 
@@ -234,10 +247,20 @@ export default function App() {
     sendMessage({ type: 'switch_team', team });
   };
 
+  const handleAddBot = (team?: Team) => {
+    sendMessage({ type: 'add_bot', team });
+  };
+
+  const handleRemoveBot = (botId?: string) => {
+    sendMessage({ type: 'remove_bot', botId });
+  };
+
   const handleUpdateRoomSettings = (settingsData: {
     mapId?: 'castle' | 'desert' | 'neon' | 'parkour';
     mode?: GameMode;
     botsEnabled?: boolean;
+    botCount?: number;
+    botDifficulty?: BotDifficulty;
     scoreLimit?: number;
     timeLimit?: number;
   }) => {
@@ -278,6 +301,8 @@ export default function App() {
           currentUserId={currentUserId}
           onStartGame={handleStartGame}
           onUpdateSettings={handleUpdateRoomSettings}
+          onAddBot={handleAddBot}
+          onRemoveBot={handleRemoveBot}
           onSwitchTeam={handleSwitchTeam}
           onLeaveRoom={handleLeaveRoom}
           onOpenSettings={() => setSettingsOpen(true)}

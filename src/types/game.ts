@@ -2,6 +2,8 @@ export type GameMode = 'SOLO' | 'TEAM' | 'POINT' | 'PARKOUR';
 
 export type Team = 'blue' | 'red' | 'ffa';
 
+export type BotDifficulty = 'easy' | 'medium' | 'hard';
+
 export type WeaponType = 'rifle' | 'shotgun' | 'sniper' | 'knife';
 
 export interface WeaponInfo {
@@ -152,6 +154,8 @@ export interface RoomState {
   pointZone?: PointZoneState;
   killFeed: KillFeedItem[];
   botsEnabled: boolean;
+  botCount: number;
+  botDifficulty: BotDifficulty;
   createdAt: number;
 }
 
@@ -170,9 +174,33 @@ export interface ClientInputs {
 
 export type ClientMessage =
   | { type: 'join_room'; code: string; playerName: string; skinId: string; color: string; preferredTeam?: Team }
-  | { type: 'create_room'; playerName: string; skinId: string; color: string; mapId: 'castle' | 'desert' | 'neon' | 'parkour'; mode: GameMode; scoreLimit?: number; timeLimit?: number }
+  | {
+      type: 'create_room';
+      playerName: string;
+      skinId: string;
+      color: string;
+      mapId: 'castle' | 'desert' | 'neon' | 'parkour';
+      mode: GameMode;
+      scoreLimit?: number;
+      timeLimit?: number;
+      botsEnabled?: boolean;
+      botCount?: number;
+      botDifficulty?: BotDifficulty;
+      startImmediately?: boolean;
+    }
   | { type: 'start_game' }
-  | { type: 'update_settings'; mapId?: 'castle' | 'desert' | 'neon' | 'parkour'; mode?: GameMode; botsEnabled?: boolean; scoreLimit?: number; timeLimit?: number }
+  | {
+      type: 'update_settings';
+      mapId?: 'castle' | 'desert' | 'neon' | 'parkour';
+      mode?: GameMode;
+      botsEnabled?: boolean;
+      botCount?: number;
+      botDifficulty?: BotDifficulty;
+      scoreLimit?: number;
+      timeLimit?: number;
+    }
+  | { type: 'add_bot'; team?: Team }
+  | { type: 'remove_bot'; botId?: string }
   | { type: 'switch_team'; team: Team }
   | { type: 'player_move'; x: number; y: number; z: number; rotY: number; pitch: number; isDashing: boolean; isCrouching: boolean }
   | { type: 'player_shoot'; weapon: WeaponType; origin: [number, number, number]; direction: [number, number, number]; hitPlayerId?: string; isHeadshot?: boolean }
