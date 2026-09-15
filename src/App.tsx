@@ -33,11 +33,21 @@ export default function App() {
   const [scoreboardOpen, setScoreboardOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [isAimingDownSights, setIsAimingDownSights] = useState(false);
+  const [lastBullet, setLastBullet] = useState<{
+    shooterId: string;
+    weapon: WeaponType;
+    origin: [number, number, number];
+    target: [number, number, number];
+    seq: number;
+  } | null>(null);
   const [hitmarkerActive, setHitmarkerActive] = useState(false);
   const [damageFlash, setDamageFlash] = useState(false);
   const [dashCooldownPct, setDashCooldownPct] = useState(0);
   const [isReloading, setIsReloading] = useState(false);
   const [gameWinner, setGameWinner] = useState<string | Team>('');
+
+  const currentUserIdRef = useRef(currentUserId);
+  currentUserIdRef.current = currentUserId;
 
   // Settings
   const [settings, setSettings] = useState<GameSettings>(() => ({
@@ -111,15 +121,23 @@ export default function App() {
           setRoom(msg.room);
           setGameWinner(msg.winner);
         } else if (msg.type === 'player_damaged') {
-          if (msg.victimId === currentUserId) {
+          if (msg.victimId === currentUserIdRef.current) {
             setDamageFlash(true);
             sound.playHurt();
             setTimeout(() => setDamageFlash(false), 250);
           }
         } else if (msg.type === 'player_killed') {
-          if (msg.killerId === currentUserId) {
+          if (msg.killerId === currentUserIdRef.current) {
             sound.playKill(msg.isHeadshot);
           }
+        } else if (msg.type === 'bullet_fired') {
+          setLastBullet({
+            shooterId: msg.shooterId,
+            weapon: msg.weapon,
+            origin: msg.origin,
+            target: msg.target,
+            seq: Date.now() + Math.random(),
+          });
         } else if (msg.type === 'chat_message') {
           setChatMessages((prev) => [...prev.slice(-30), msg.message]);
         } else if (msg.type === 'error') {
@@ -139,7 +157,7 @@ export default function App() {
     ws.onerror = () => {
       setConnected(false);
     };
-  }, [currentUserId]);
+  }, []);
 
   useEffect(() => {
     connectWs();
@@ -316,6 +334,7 @@ export default function App() {
             room={room}
             currentUserId={currentUserId}
             settings={settings}
+            lastBullet={lastBullet}
             onSendMessage={sendMessage}
             onOpenScoreboard={() => setScoreboardOpen((prev) => !prev)}
             onTriggerHitmarker={handleTriggerHitmarker}

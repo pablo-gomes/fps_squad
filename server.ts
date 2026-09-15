@@ -234,9 +234,18 @@ wss.on('connection', (ws: WebSocket) => {
           return;
         }
 
+        // If room is full, check if there are bots that can be replaced by a human friend
         if (Object.keys(room.players).length >= room.maxPlayers) {
-          ws.send(JSON.stringify({ type: 'error', message: 'A sala está cheia!' }));
-          return;
+          const botsInRoom = Object.values(room.players).filter(p => p.isBot);
+          if (botsInRoom.length > 0) {
+            // Remove one bot to make space for the joining human friend
+            const botToRemove = botsInRoom[botsInRoom.length - 1];
+            delete room.players[botToRemove.id];
+            room.botCount = Object.values(room.players).filter(p => p.isBot).length;
+          } else {
+            ws.send(JSON.stringify({ type: 'error', message: 'A sala está cheia!' }));
+            return;
+          }
         }
 
         const playerId = 'p_' + Math.random().toString(36).substring(2, 9);
@@ -276,6 +285,9 @@ wss.on('connection', (ws: WebSocket) => {
         clientMeta.set(ws, { playerId, roomCode: code });
 
         ws.send(JSON.stringify({ type: 'room_joined', room, yourId: playerId }));
+        if (room.status === 'PLAYING') {
+          ws.send(JSON.stringify({ type: 'game_started', room }));
+        }
         broadcastToRoom(code, { type: 'player_joined', player: newPlayer }, ws);
 
         const chatNotice: ChatMessage = {
@@ -748,37 +760,37 @@ setInterval(() => {
 
     const diffParams = {
       easy: {
-        detectRange: 24,
-        moveSpeed: 0.16,
-        shootChance: 0.06,
-        hitChanceNear: 0.35,
-        hitChanceFar: 0.18,
-        headshotChance: 0.05,
+        detectRange: 32,
+        moveSpeed: 0.20,
+        shootChance: 0.12,
+        hitChanceNear: 0.50,
+        hitChanceFar: 0.28,
+        headshotChance: 0.08,
       },
       medium: {
-        detectRange: 35,
-        moveSpeed: 0.23,
-        shootChance: 0.13,
-        hitChanceNear: 0.55,
-        hitChanceFar: 0.35,
-        headshotChance: 0.15,
+        detectRange: 45,
+        moveSpeed: 0.28,
+        shootChance: 0.20,
+        hitChanceNear: 0.70,
+        hitChanceFar: 0.45,
+        headshotChance: 0.18,
       },
       hard: {
-        detectRange: 50,
-        moveSpeed: 0.30,
-        shootChance: 0.22,
-        hitChanceNear: 0.75,
-        hitChanceFar: 0.55,
-        headshotChance: 0.30,
+        detectRange: 60,
+        moveSpeed: 0.36,
+        shootChance: 0.30,
+        hitChanceNear: 0.88,
+        hitChanceFar: 0.65,
+        headshotChance: 0.35,
       },
     }[difficulty];
 
     playersList.forEach(bot => {
       if (!bot.isBot || !bot.isAlive) return;
 
-      // Find nearest living opponent
+      // Find nearest living opponent anywhere on the map!
       let nearestOpponent: PlayerData | null = null;
-      let minDist = diffParams.detectRange;
+      let minDist = 9999;
 
       playersList.forEach(other => {
         if (other.id === bot.id || !other.isAlive) return;
@@ -790,9 +802,9 @@ setInterval(() => {
         }
       });
 
-      // Target position: either opponent or capture point (in POINT mode)
-      let targetX = bot.x;
-      let targetZ = bot.z;
+      // Target position: either opponent, capture point, or patrol towards center
+      let targetX = 0;
+      let targetZ = 0;
       let hasTarget = false;
 
       if (nearestOpponent) {
@@ -801,14 +813,15 @@ setInterval(() => {
         targetZ = opp.z;
         hasTarget = true;
       } else if (room.mode === 'POINT' && room.pointZone) {
-        // Move towards point zone if no nearby enemy
         const pz = room.pointZone;
-        const distToPz = Math.sqrt((pz.x - bot.x) ** 2 + (pz.z - bot.z) ** 2);
-        if (distToPz > 3) {
-          targetX = pz.x + (Math.random() - 0.5) * 3;
-          targetZ = pz.z + (Math.random() - 0.5) * 3;
-          hasTarget = true;
-        }
+        targetX = pz.x + (Math.random() - 0.5) * 4;
+        targetZ = pz.z + (Math.random() - 0.5) * 4;
+        hasTarget = true;
+      } else {
+        // Patrol around map center
+        targetX = Math.sin(Date.now() / 4000) * 12;
+        targetZ = Math.cos(Date.now() / 4000) * 12;
+        hasTarget = true;
       }
 
       if (hasTarget) {
@@ -816,29 +829,52 @@ setInterval(() => {
         const dz = targetZ - bot.z;
         bot.rotY = Math.atan2(dx, dz);
 
+        if (nearestOpponent) {
+          const opp = nearestOpponent as PlayerData;
+          const dy = (opp.y || 1.5) - (bot.y || 1.5);
+          bot.pitch = -Math.atan2(dy, Math.max(0.5, minDist));
+        } else {
+          bot.pitch = 0;
+        }
+
         const distToTarget = Math.sqrt(dx * dx + dz * dz);
         const moveSpeed = diffParams.moveSpeed;
 
-        if (distToTarget > (nearestOpponent ? 7 : 2)) {
+        if (distToTarget > 12) {
+          // Approach target
           bot.x += Math.sin(bot.rotY) * moveSpeed;
           bot.z += Math.cos(bot.rotY) * moveSpeed;
         } else if (nearestOpponent) {
-          // Dynamic strafing around opponent
-          const strafeFactor = difficulty === 'hard' ? 0.22 : 0.14;
-          const strafeDirection = Math.sin(Date.now() / 350);
-          bot.x += Math.cos(bot.rotY) * (strafeDirection * strafeFactor);
-          bot.z -= Math.sin(bot.rotY) * (strafeDirection * strafeFactor);
+          // Combat strafe around opponent
+          const strafeFactor = difficulty === 'hard' ? 0.28 : 0.18;
+          const seed = parseInt(bot.id.slice(-2), 36) || 1;
+          const strafeDir = Math.sin(Date.now() / 320 + seed);
+          bot.x += Math.cos(bot.rotY) * (strafeDir * strafeFactor);
+          bot.z -= Math.sin(bot.rotY) * (strafeDir * strafeFactor);
         }
+
+        // Clamp to map boundaries
+        bot.x = Math.max(-32, Math.min(32, bot.x));
+        bot.z = Math.max(-32, Math.min(32, bot.z));
+        bot.y = 1.5;
       }
 
-      // Shooting at living opponent
-      if (nearestOpponent) {
+      // Shooting at living opponent within detectRange
+      if (nearestOpponent && minDist <= diffParams.detectRange) {
         const opp = nearestOpponent as PlayerData;
-        if (minDist < diffParams.detectRange && Math.random() < diffParams.shootChance) {
-          const hitChance = minDist < 12 ? diffParams.hitChanceNear : diffParams.hitChanceFar;
+        if (Math.random() < diffParams.shootChance) {
+          const hitChance = minDist < 14 ? diffParams.hitChanceNear : diffParams.hitChanceFar;
           const isHit = Math.random() < hitChance;
           const isHeadshot = isHit && Math.random() < diffParams.headshotChance;
           const hitId = isHit ? opp.id : undefined;
+
+          // Trigger bot firing animation
+          bot.isShooting = true;
+          setTimeout(() => {
+            if (room.players[bot.id]) {
+              room.players[bot.id].isShooting = false;
+            }
+          }, 160);
 
           broadcastToRoom(room.code, {
             type: 'bullet_fired',

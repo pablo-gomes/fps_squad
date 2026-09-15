@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { PlayerData, RoomState, WeaponType, WEAPONS, KillFeedItem, ChatMessage } from '../types/game';
-import { Shield, Zap, Crosshair as CrosshairIcon, MessageSquare, Send, Volume2, VolumeX, ListOrdered, Users } from 'lucide-react';
+import { Shield, Zap, Crosshair as CrosshairIcon, MessageSquare, Send, Volume2, VolumeX, ListOrdered, Users, Share2, Check, Copy } from 'lucide-react';
 import { sound } from '../services/sound';
 
 interface HUDProps {
@@ -48,7 +48,16 @@ export const HUD: React.FC<HUDProps> = ({
   const [chatOpen, setChatOpen] = useState(false);
   const [chatText, setChatText] = useState('');
   const [isMuted, setIsMuted] = useState(sound.isMuted());
+  const [copiedLink, setCopiedLink] = useState(false);
   const chatInputRef = useRef<HTMLInputElement>(null);
+
+  const handleCopyLink = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const url = `${window.location.origin}${window.location.pathname}?room=${room.code}`;
+    navigator.clipboard.writeText(url);
+    setCopiedLink(true);
+    setTimeout(() => setCopiedLink(false), 2000);
+  };
 
   const weaponInfo = WEAPONS[player.currentWeapon];
   const hpPct = Math.max(0, Math.min(1, player.hp / player.maxHp));
@@ -161,21 +170,25 @@ export const HUD: React.FC<HUDProps> = ({
             <span className="font-mono font-bold text-amber-400 text-sm tracking-wider">{room.code}</span>
             <span className="text-neutral-600">|</span>
             <span className="text-neutral-300 font-semibold">{room.mode}</span>
+            <button
+              onClick={handleCopyLink}
+              title="Copiar link da sala para convidar amigos"
+              className="pointer-events-auto ml-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-400 border border-amber-500/40 px-2 py-0.5 rounded text-[11px] font-bold flex items-center gap-1 cursor-pointer transition active:scale-95"
+            >
+              {copiedLink ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+              <span>{copiedLink ? 'Copiado!' : 'Convidar'}</span>
+            </button>
           </div>
 
-          {/* Quick Rank preview */}
+          {/* Quick Rank preview and participants breakdown */}
           <div className="bg-neutral-950/70 backdrop-blur-md px-2.5 py-1 rounded-md border border-neutral-800/80 text-[11px] text-neutral-300 flex items-center gap-2">
             <span>
               Você: <strong className="text-amber-400">#{myRank}</strong> ({player.kills} Kills)
             </span>
-            {leader && (
-              <>
-                <span className="text-neutral-600">•</span>
-                <span className="text-neutral-400 truncate max-w-[130px]">
-                  Líder: <strong className="text-neutral-200">{leader.name}</strong> ({leader.kills}K)
-                </span>
-              </>
-            )}
+            <span className="text-neutral-600">•</span>
+            <span className="text-slate-400">
+              {allPlayers.filter(p => !p.isBot).length} amigos • {allPlayers.filter(p => p.isBot).length} bots
+            </span>
           </div>
         </div>
 

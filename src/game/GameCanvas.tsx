@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
 import { PlayerData, RoomState, WeaponType, WEAPONS, ClientMessage } from '../types/game';
-import { buildMap, MapData, VoxelBox } from './voxelMap';
+import { buildMap, MapData } from './voxelMap';
 import { VoxelCharacter } from './voxelPlayer';
 import { sound } from '../services/sound';
 import { GameSettings } from '../components/SettingsModal';
@@ -10,6 +10,13 @@ interface GameCanvasProps {
   room: RoomState;
   currentUserId: string;
   settings: GameSettings;
+  lastBullet?: {
+    shooterId: string;
+    weapon: WeaponType;
+    origin: [number, number, number];
+    target: [number, number, number];
+    seq: number;
+  } | null;
   onSendMessage: (msg: ClientMessage) => void;
   onOpenScoreboard: () => void;
   onTriggerHitmarker: () => void;
@@ -28,6 +35,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   room,
   currentUserId,
   settings,
+  lastBullet,
   onSendMessage,
   onOpenScoreboard,
   onTriggerHitmarker,
@@ -46,12 +54,45 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   // States
   const [isPointerLocked, setIsPointerLocked] = useState(false);
 
-  // References to keep game loop fast and garbage-collection free
+  // References to keep game loop fast, reactive, and garbage-collection free
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const mapDataRef = useRef<MapData | null>(null);
   const otherCharactersRef = useRef<Map<string, VoxelCharacter>>(new Map());
+
+  // Keep live props in refs to avoid re-mounting Three.js scene
+  const roomRef = useRef(room);
+  roomRef.current = room;
+
+  const currentUserIdRef = useRef(currentUserId);
+  currentUserIdRef.current = currentUserId;
+
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+
+  const onSendMessageRef = useRef(onSendMessage);
+  onSendMessageRef.current = onSendMessage;
+
+  const onOpenScoreboardRef = useRef(onOpenScoreboard);
+  onOpenScoreboardRef.current = onOpenScoreboard;
+
+  const onTriggerHitmarkerRef = useRef(onTriggerHitmarker);
+  onTriggerHitmarkerRef.current = onTriggerHitmarker;
+
+  const onTriggerDamageFlashRef = useRef(onTriggerDamageFlash);
+  onTriggerDamageFlashRef.current = onTriggerDamageFlash;
+
+  const onDashCooldownChangeRef = useRef(onDashCooldownChange);
+  onDashCooldownChangeRef.current = onDashCooldownChange;
+
+  const onReloadStatusChangeRef = useRef(onReloadStatusChange);
+  onReloadStatusChangeRef.current = onReloadStatusChange;
+
+  const isAimingDownSightsRef = useRef(isAimingDownSights);
+  isAimingDownSightsRef.current = isAimingDownSights;
+
+  const wasAliveRef = useRef(true);
 
   // Player physics state
   const posRef = useRef(new THREE.Vector3(0, 2, 0));
@@ -116,33 +157,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     }
   };
 
-  // Switch weapon handler
-  const switchWeapon = useCallback((weapon: WeaponType) => {
-    if (isReloadingRef.current) return;
-    currentWeaponRef.current = weapon;
-    ammoRef.current = WEAPONS[weapon].magSize;
-    onSendMessage({ type: 'player_switch_weapon', weapon });
-    rebuildViewmodel(weapon);
-  }, [onSendMessage]);
-
-  // Reload handler
-  const reload = useCallback(() => {
-    if (isReloadingRef.current || currentWeaponRef.current === 'knife') return;
-    const w = WEAPONS[currentWeaponRef.current];
-    if (ammoRef.current >= w.magSize) return;
-
-    isReloadingRef.current = true;
-    onReloadStatusChange(true);
-    sound.playReload();
-
-    setTimeout(() => {
-      isReloadingRef.current = false;
-      onReloadStatusChange(false);
-      ammoRef.current = w.magSize;
-      onSendMessage({ type: 'player_reload' });
-    }, w.reloadTimeMs);
-  }, [onReloadStatusChange, onSendMessage]);
-
   // Helper to build viewmodel gun in first person
   const rebuildViewmodel = (weapon: WeaponType) => {
     if (!viewmodelRef.current) return;
@@ -189,6 +203,85 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     }
   };
 
+  // Switch weapon handler
+  const switchWeapon = useCallback((weapon: WeaponType) => {
+    if (isReloadingRef.current) return;
+    currentWeaponRef.current = weapon;
+    ammoRef.current = WEAPONS[weapon].magSize;
+    onSendMessageRef.current({ type: 'player_switch_weapon', weapon });
+    rebuildViewmodel(weapon);
+  }, []);
+
+  // Reload handler
+  const reload = useCallback(() => {
+    if (isReloadingRef.current || currentWeaponRef.current === 'knife') return;
+    const w = WEAPONS[currentWeaponRef.current];
+    if (ammoRef.current >= w.magSize) return;
+
+    isReloadingRef.current = true;
+    onReloadStatusChangeRef.current(true);
+    sound.playReload();
+
+    setTimeout(() => {
+      isReloadingRef.current = false;
+      onReloadStatusChangeRef.current(false);
+      ammoRef.current = w.magSize;
+      onSendMessageRef.current({ type: 'player_reload' });
+    }, w.reloadTimeMs);
+  }, []);
+
+  // Visual tracer bullet
+  const spawnTracer = useCallback((originArr: [number, number, number], targetArr: [number, number, number], weapon: WeaponType) => {
+    if (!sceneRef.current) return;
+    const origin = new THREE.Vector3(...originArr);
+    const target = new THREE.Vector3(...targetArr);
+    if (origin.distanceTo(target) < 0.1) return;
+
+    const color = weapon === 'sniper' ? 0x38bdf8 : weapon === 'shotgun' ? 0xf97316 : 0xfde047;
+    const mat = new THREE.LineBasicMaterial({
+      color,
+      linewidth: 2,
+      transparent: true,
+      opacity: 0.85,
+    });
+    const geo = new THREE.BufferGeometry().setFromPoints([origin, target]);
+    const line = new THREE.Line(geo, mat);
+    sceneRef.current.add(line);
+
+    // Muzzle flash particle at origin
+    const flashGeo = new THREE.SphereGeometry(0.08, 4, 4);
+    const flashMat = new THREE.MeshBasicMaterial({ color: 0xffea75, transparent: true, opacity: 0.9 });
+    const flashMesh = new THREE.Mesh(flashGeo, flashMat);
+    flashMesh.position.copy(origin);
+    sceneRef.current.add(flashMesh);
+
+    setTimeout(() => {
+      if (sceneRef.current) {
+        sceneRef.current.remove(line);
+        sceneRef.current.remove(flashMesh);
+      }
+      geo.dispose();
+      mat.dispose();
+      flashGeo.dispose();
+      flashMat.dispose();
+    }, 100);
+  }, []);
+
+  // Watch for bullets fired across the room
+  useEffect(() => {
+    if (!lastBullet || !sceneRef.current) return;
+    spawnTracer(lastBullet.origin, lastBullet.target, lastBullet.weapon);
+
+    // If fired by another player or bot, play sound based on proximity
+    if (lastBullet.shooterId !== currentUserIdRef.current && cameraRef.current) {
+      const shooterPos = new THREE.Vector3(...lastBullet.origin);
+      const dist = cameraRef.current.position.distanceTo(shooterPos);
+      if (dist < 70) {
+        sound.playShoot(lastBullet.weapon);
+      }
+    }
+  }, [lastBullet, spawnTracer]);
+
   // Perform shooting
   const triggerShoot = useCallback(() => {
     if (!cameraRef.current || !sceneRef.current || isReloadingRef.current) return;
@@ -224,11 +317,14 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion).normalize();
 
     // Spread
-    if (weapon.spread > 0 && !isAimingDownSights) {
+    if (weapon.spread > 0 && !isAimingDownSightsRef.current) {
       forward.x += (Math.random() - 0.5) * weapon.spread;
       forward.y += (Math.random() - 0.5) * weapon.spread;
       forward.normalize();
     }
+
+    // Default tracer end
+    const tracerEnd = origin.clone().add(forward.clone().multiplyScalar(weapon.range));
 
     // Check hit candidates among other living characters
     let hitPlayerId: string | undefined = undefined;
@@ -238,7 +334,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     const raycaster = new THREE.Raycaster(origin, forward, 0.1, weapon.range);
 
     otherCharactersRef.current.forEach((char, pId) => {
-      const otherData = room.players[pId];
+      const otherData = roomRef.current.players[pId];
       if (!otherData || !otherData.isAlive) return;
 
       const intersects = raycaster.intersectObjects(char.group.children, true);
@@ -247,19 +343,26 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         if (firstHit.distance < closestDist) {
           closestDist = firstHit.distance;
           hitPlayerId = pId;
-          // Check if head was hit
+          tracerEnd.copy(firstHit.point);
           isHeadshot = firstHit.point.y > char.group.position.y + 1.4;
         }
       }
     });
 
+    // Instant local tracer
+    spawnTracer(
+      [origin.x, origin.y - 0.15, origin.z],
+      [tracerEnd.x, tracerEnd.y, tracerEnd.z],
+      weapon.id
+    );
+
     if (hitPlayerId) {
       sound.playHitmarker();
-      onTriggerHitmarker();
+      onTriggerHitmarkerRef.current();
     }
 
     // Send shot to server
-    onSendMessage({
+    onSendMessageRef.current({
       type: 'player_shoot',
       weapon: weapon.id,
       origin: [origin.x, origin.y, origin.z],
@@ -267,7 +370,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       hitPlayerId,
       isHeadshot,
     });
-  }, [isAimingDownSights, onSendMessage, onTriggerHitmarker, reload, room.players]);
+  }, [reload, spawnTracer]);
 
   // Dash execution
   const triggerDash = useCallback(() => {
@@ -298,19 +401,35 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     }
   }, []);
 
-  // Set up Three.js scene & main game loop
+  // Dynamic references for listeners to avoid re-binding
+  const triggerShootRef = useRef(triggerShoot);
+  triggerShootRef.current = triggerShoot;
+
+  const triggerJumpRef = useRef(triggerJump);
+  triggerJumpRef.current = triggerJump;
+
+  const triggerDashRef = useRef(triggerDash);
+  triggerDashRef.current = triggerDash;
+
+  const switchWeaponRef = useRef(switchWeapon);
+  switchWeaponRef.current = switchWeapon;
+
+  const reloadRef = useRef(reload);
+  reloadRef.current = reload;
+
+  // Set up Three.js scene & main game loop (ONLY re-runs if map changes)
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
     // Scene
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(room.mapId === 'neon' ? 0x050811 : 0x7dd3fc); // Sky blue or cyber dark
+    scene.background = new THREE.Color(room.mapId === 'neon' ? 0x050811 : 0x7dd3fc);
     scene.fog = new THREE.FogExp2(room.mapId === 'neon' ? 0x050811 : 0x7dd3fc, 0.015);
     sceneRef.current = scene;
 
     // Camera
-    const camera = new THREE.PerspectiveCamera(settings.fov, container.clientWidth / container.clientHeight, 0.1, 500);
+    const camera = new THREE.PerspectiveCamera(settingsRef.current.fov, container.clientWidth / container.clientHeight, 0.1, 500);
     camera.rotation.order = 'YXZ';
     cameraRef.current = camera;
     scene.add(camera);
@@ -348,7 +467,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     scene.add(mapData.group);
     mapDataRef.current = mapData;
 
-    // Pick a spawn point
+    // Pick initial spawn point
     const spawns = room.mode === 'TEAM'
       ? (me?.team === 'blue' ? mapData.spawns.blue : mapData.spawns.red)
       : mapData.spawns.ffa;
@@ -374,9 +493,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     const handleMouseMove = (e: MouseEvent) => {
       if (document.pointerLockElement !== container) return;
 
-      const sens = 0.002 * settings.mouseSensitivity;
+      const sens = 0.002 * (settingsRef.current.mouseSensitivity || 1.0);
       yawRef.current -= e.movementX * sens;
-      const invert = settings.invertY ? -1 : 1;
+      const invert = settingsRef.current.invertY ? -1 : 1;
       pitchRef.current -= e.movementY * sens * invert;
       pitchRef.current = Math.max(-Math.PI / 2.1, Math.min(Math.PI / 2.1, pitchRef.current));
     };
@@ -387,7 +506,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       if (document.pointerLockElement !== container) return;
       if (e.button === 0) {
         keysRef.current.shoot = true;
-        triggerShoot();
+        triggerShootRef.current();
       } else if (e.button === 2) {
         setIsAimingDownSights(true);
       }
@@ -427,7 +546,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           keysRef.current.right = true;
           break;
         case 'Space':
-          triggerJump();
+          triggerJumpRef.current();
           e.preventDefault();
           break;
         case 'ShiftLeft':
@@ -435,26 +554,26 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           isCrouchingRef.current = true;
           break;
         case 'KeyE':
-          triggerDash();
+          triggerDashRef.current();
           break;
         case 'KeyR':
-          reload();
+          reloadRef.current();
           break;
         case 'Tab':
-          onOpenScoreboard();
+          onOpenScoreboardRef.current();
           e.preventDefault();
           break;
         case 'Digit1':
-          switchWeapon('rifle');
+          switchWeaponRef.current('rifle');
           break;
         case 'Digit2':
-          switchWeapon('shotgun');
+          switchWeaponRef.current('shotgun');
           break;
         case 'Digit3':
-          switchWeapon('sniper');
+          switchWeaponRef.current('sniper');
           break;
         case 'Digit4':
-          switchWeapon('knife');
+          switchWeaponRef.current('knife');
           break;
       }
     };
@@ -494,7 +613,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     });
     resizeObserver.observe(container);
 
-    // Physics helper: Check AABB collision against map
+    // Physics collision check against map voxels
     const checkCollision = (nextPos: THREE.Vector3, playerRadius: number, playerHeight: number): { x: number; y: number; z: number; hitGround: boolean } => {
       const colliders = mapData.colliders;
       let x = nextPos.x;
@@ -502,14 +621,11 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       let z = nextPos.z;
       let hitGround = false;
 
-      // Player bounding box
       const minP = new THREE.Vector3(x - playerRadius, y, z - playerRadius);
       const maxP = new THREE.Vector3(x + playerRadius, y + playerHeight, z + playerRadius);
 
       for (let i = 0; i < colliders.length; i++) {
         const box = colliders[i];
-
-        // Check intersection
         if (
           minP.x < box.max.x &&
           maxP.x > box.min.x &&
@@ -518,10 +634,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           minP.z < box.max.z &&
           maxP.z > box.min.z
         ) {
-          // Resolve vertical collision first (floor/ceiling)
           const overlapYTop = box.max.y - minP.y;
-          const overlapYBottom = maxP.y - box.min.y;
-
           if (overlapYTop < 0.6 && velRef.current.y <= 0) {
             y = box.max.y;
             hitGround = true;
@@ -546,24 +659,24 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       // Dash cooldown calculation
       const elapsedSinceDash = Date.now() - dashLastUsedRef.current;
       const cooldownPct = Math.max(0, 1 - elapsedSinceDash / DASH_COOLDOWN_MS);
-      onDashCooldownChange(cooldownPct);
+      onDashCooldownChangeRef.current(cooldownPct);
 
       // Handle touch triggers
       if (touchJumpRef.current) {
-        triggerJump();
+        triggerJumpRef.current();
         touchJumpRef.current = false;
       }
       if (touchDashRef.current) {
-        triggerDash();
+        triggerDashRef.current();
         touchDashRef.current = false;
       }
       if (touchFireRef.current) {
-        triggerShoot();
+        triggerShootRef.current();
       }
 
-      // Automatic fire if holding left mouse button with automatic weapons
+      // Automatic fire if holding left mouse button with rifle
       if (keysRef.current.shoot && currentWeaponRef.current === 'rifle') {
-        triggerShoot();
+        triggerShootRef.current();
       }
 
       // 1. Calculate Movement Vector
@@ -610,7 +723,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       // Gravity
       velRef.current.y -= 28 * delta;
 
-      // New candidate position
+      // Candidate position
       const nextPos = posRef.current.clone();
       nextPos.x += velRef.current.x * delta;
       nextPos.y += velRef.current.y * delta;
@@ -640,16 +753,17 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       });
 
       // Check Sky Parkour Checkpoints
-      if (room.mode === 'PARKOUR' && mapData.checkpoints) {
+      if (roomRef.current.mode === 'PARKOUR' && mapData.checkpoints) {
         mapData.checkpoints.forEach(cp => {
           const d = posRef.current.distanceTo(cp.position);
           if (d < cp.radius) {
-            const currentCp = me?.parkourCheckpoint || 0;
+            const currentMe = roomRef.current.players[currentUserIdRef.current];
+            const currentCp = currentMe?.parkourCheckpoint || 0;
             if (cp.id > currentCp) {
-              onSendMessage({
+              onSendMessageRef.current({
                 type: 'parkour_checkpoint',
                 checkpoint: cp.id,
-                time: Date.now() - room.createdAt,
+                time: Date.now() - roomRef.current.createdAt,
               });
               sound.playKill(true);
             }
@@ -659,11 +773,20 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
 
       // Void death check
       if (posRef.current.y < mapData.deathY) {
-        // Teleport to spawn
         const safeSpawn = spawns[0] || new THREE.Vector3(0, 3, 0);
         posRef.current.copy(safeSpawn);
         velRef.current.set(0, 0, 0);
         sound.playHurt();
+      }
+
+      // Check local player respawn transition
+      const currentMe = roomRef.current.players[currentUserIdRef.current];
+      if (currentMe) {
+        if (!wasAliveRef.current && currentMe.isAlive) {
+          posRef.current.set(currentMe.x, currentMe.y, currentMe.z);
+          velRef.current.set(0, 0, 0);
+        }
+        wasAliveRef.current = currentMe.isAlive;
       }
 
       // 2. Camera Updates
@@ -672,7 +795,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       camera.rotation.x = pitchRef.current;
 
       // Smooth ADS zoom FOV
-      const targetFov = isAimingDownSights ? (WEAPONS[currentWeaponRef.current].zoomFov || 45) : settings.fov;
+      const baseFov = settingsRef.current.fov || 85;
+      const targetFov = isAimingDownSightsRef.current ? (WEAPONS[currentWeaponRef.current].zoomFov || 45) : baseFov;
       camera.fov = THREE.MathUtils.lerp(camera.fov, targetFov, 0.25);
       camera.updateProjectionMatrix();
 
@@ -689,17 +813,15 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           viewmodel.position.x = THREE.MathUtils.lerp(viewmodel.position.x, 0.24, 0.1);
           viewmodel.position.y = THREE.MathUtils.lerp(viewmodel.position.y, -0.22, 0.1);
         }
-        // Recoil recovery
         viewmodel.position.z = THREE.MathUtils.lerp(viewmodel.position.z, -0.45, 0.15);
       }
 
-      // 3. Update Other Players Voxel Meshes
-      const currentPlayers = room.players;
+      // 3. Update Other Players and Bots Voxel Meshes
+      const currentPlayers = roomRef.current.players;
       const charsMap = otherCharactersRef.current;
 
-      // Add or update other players
       (Object.values(currentPlayers) as PlayerData[]).forEach(p => {
-        if (p.id === currentUserId) return;
+        if (p.id === currentUserIdRef.current) return;
 
         let char = charsMap.get(p.id);
         if (!char) {
@@ -708,7 +830,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           charsMap.set(p.id, char);
         }
 
-        // Update target transform
         char.targetPos.set(p.x, p.y, p.z);
         char.targetRotY = p.rotY;
         char.targetPitch = p.pitch;
@@ -716,12 +837,11 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         char.updateNameplate(p.name, p.hp, p.maxHp, p.team);
         char.setWeapon(p.currentWeapon);
 
-        // Distance check for movement animation
         const isOtherMoving = char.group.position.distanceTo(char.targetPos) > 0.05;
         char.update(delta, isOtherMoving, !!p.isShooting, !!p.isCrouching);
       });
 
-      // Remove players who disconnected
+      // Remove players/bots who left
       charsMap.forEach((char, pId) => {
         if (!currentPlayers[pId]) {
           scene.remove(char.group);
@@ -734,7 +854,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       networkSendTimer += delta;
       if (networkSendTimer >= 0.05) {
         networkSendTimer = 0;
-        onSendMessage({
+        onSendMessageRef.current({
           type: 'player_move',
           x: posRef.current.x,
           y: posRef.current.y,
@@ -775,7 +895,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         renderer.domElement.parentNode.removeChild(renderer.domElement);
       }
     };
-  }, [me?.team, onDashCooldownChange, onOpenScoreboard, onSendMessage, reload, room.createdAt, room.mapId, room.mode, room.players, settings, switchWeapon, touchDashRef, touchFireRef, touchJumpRef, triggerDash, triggerJump, triggerShoot]);
+  }, [room.mapId]);
 
   // Touch screen swipe to look
   const handleTouchStartLook = (e: React.TouchEvent) => {
@@ -795,9 +915,10 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     touchLookRef.current.lastX = touch.clientX;
     touchLookRef.current.lastY = touch.clientY;
 
-    const sens = 0.003 * settings.mouseSensitivity;
+    const sens = 0.004 * (settingsRef.current.mouseSensitivity || 1.0);
     yawRef.current -= dx * sens;
-    pitchRef.current -= dy * sens * (settings.invertY ? -1 : 1);
+    const invert = settingsRef.current.invertY ? -1 : 1;
+    pitchRef.current -= dy * sens * invert;
     pitchRef.current = Math.max(-Math.PI / 2.1, Math.min(Math.PI / 2.1, pitchRef.current));
   };
 
@@ -805,37 +926,80 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     touchLookRef.current.active = false;
   };
 
+  // Touch joystick touch handlers
+  const handleTouchStartJoy = (e: React.TouchEvent) => {
+    const touch = e.touches[0];
+    touchJoystickRef.current = {
+      startX: touch.clientX,
+      startY: touch.clientY,
+      currentX: touch.clientX,
+      currentY: touch.clientY,
+      active: true,
+    };
+  };
+
+  const handleTouchMoveJoy = (e: React.TouchEvent) => {
+    if (!touchJoystickRef.current.active) return;
+    const touch = e.touches[0];
+    touchJoystickRef.current.currentX = touch.clientX;
+    touchJoystickRef.current.currentY = touch.clientY;
+  };
+
+  const handleTouchEndJoy = () => {
+    touchJoystickRef.current.active = false;
+  };
+
   return (
     <div
+      id="game-canvas-container"
       ref={containerRef}
       onClick={requestPointerLock}
-      className="relative w-full h-full cursor-crosshair overflow-hidden select-none touch-none"
+      className="relative w-full h-full select-none overflow-hidden cursor-crosshair"
     >
-      {/* Click to Play Overlay (Desktop Pointer Lock prompt) */}
-      {!isPointerLocked && !isMobile && (
-        <div className="absolute inset-0 z-40 flex items-center justify-center bg-neutral-950/70 backdrop-blur-sm cursor-pointer">
-          <div className="bg-neutral-900 border border-neutral-700 p-6 rounded-2xl text-center shadow-2xl max-w-sm">
-            <h3 className="text-xl font-black font-display uppercase tracking-wider text-amber-400 mb-2">
-              Clique para Controlar
-            </h3>
-            <p className="text-xs text-neutral-300 mb-4">
-              Trave a mira do mouse na tela para movimentar a câmera e atirar com precisão. Pressione <strong className="text-amber-400">[ESC]</strong> para liberar.
-            </p>
-            <div className="py-2 px-4 rounded-xl bg-amber-500 text-neutral-950 font-bold uppercase text-xs">
-              Entrar em Ação
+      {/* Click to lock mouse prompt (Desktop only) */}
+      {!isMobile && !isPointerLocked && (
+        <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-950/60 backdrop-blur-xs pointer-events-none">
+          <div className="bg-slate-900/90 border border-slate-700/80 rounded-2xl p-6 text-center shadow-2xl max-w-sm pointer-events-auto">
+            <div className="w-12 h-12 mx-auto mb-3 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center text-xl font-black">
+              🖱️
             </div>
+            <h3 className="text-white font-bold text-lg mb-1">Clique para Controlar</h3>
+            <p className="text-slate-400 text-xs mb-4">
+              Bloqueie o cursor para mirar em 360°, atirar e movimentar livremente pelo mapa.
+            </p>
+            <button
+              onClick={requestPointerLock}
+              className="px-5 py-2.5 bg-amber-500 hover:bg-amber-400 active:scale-95 text-slate-950 font-black text-sm rounded-xl transition cursor-pointer shadow-lg shadow-amber-500/20"
+            >
+              Iniciar Partida
+            </button>
           </div>
         </div>
       )}
 
-      {/* Mobile Touch Aim Surface (Right half of screen) */}
+      {/* Mobile Touch Overlay */}
       {isMobile && (
-        <div
-          onTouchStart={handleTouchStartLook}
-          onTouchMove={handleTouchMoveLook}
-          onTouchEnd={handleTouchEndLook}
-          className="absolute inset-y-0 right-0 w-1/2 z-20 pointer-events-auto opacity-0"
-        />
+        <div className="absolute inset-0 pointer-events-auto flex">
+          {/* Left half: Virtual Movement Joystick */}
+          <div
+            className="w-1/2 h-full touch-none relative"
+            onTouchStart={handleTouchStartJoy}
+            onTouchMove={handleTouchMoveJoy}
+            onTouchEnd={handleTouchEndJoy}
+          >
+            <div className="absolute bottom-10 left-10 w-28 h-28 rounded-full border-2 border-white/20 bg-white/5 flex items-center justify-center pointer-events-none">
+              <div className="w-12 h-12 rounded-full bg-amber-500/40 border border-amber-400/60" />
+            </div>
+          </div>
+
+          {/* Right half: Touch swipe to look */}
+          <div
+            className="w-1/2 h-full touch-none"
+            onTouchStart={handleTouchStartLook}
+            onTouchMove={handleTouchMoveLook}
+            onTouchEnd={handleTouchEndLook}
+          />
+        </div>
       )}
     </div>
   );
